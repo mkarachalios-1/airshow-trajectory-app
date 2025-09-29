@@ -1,9 +1,11 @@
 # streamlit_app.py
 # Airshow Trajectory Envelope (Wind = 0)
-# - Axes naming: Display Line (x), Crowd (y), Height (z)
-# - Plotly animation (XY, XZ, YZ) with Play/Pause/Stop/Replay
-# - Session state to prevent reset when changing animation speed
-# - Optional Auto-update on input changes; or explicit Run
+# K.I.S.S. version:
+# - Axes legend uses x / y / z mapping; axes labels are short (x [m], y [m], z [m])
+# - Plotly animation with Play / Pause / Stop / Replay; speed slider controls frame duration
+# - Consistent colors for AIR vs GROUND across XY, XZ, YZ
+# - Results recompute ONLY when you press "Run simulation"
+# - Results persist while you change animation speed (no reset)
 
 import math
 import io
@@ -18,15 +20,11 @@ import plotly.graph_objects as go
 
 st.set_page_config(page_title="Airshow Trajectory (Wind=0)", layout="wide")
 
-# === Session state defaults (persist results across UI interactions) ===
+# Persist last simulation so UI tweaks (e.g., animation speed) don't wipe results
 if "sim_df" not in st.session_state:
     st.session_state["sim_df"] = None
 if "sim_summary" not in st.session_state:
     st.session_state["sim_summary"] = None
-if "last_inputs" not in st.session_state:
-    st.session_state["last_inputs"] = None
-if "auto_update" not in st.session_state:
-    st.session_state["auto_update"] = True
 
 # -----------------------------
 # Physics & constants
@@ -88,7 +86,7 @@ def simulate_3d(
             vrelx, vrely, vrelz = vx, vy, vz
             vmag = math.sqrt(vrelx*vrelx + vrely*vrely + vrelz*vrelz)
 
-            # Accelerations (vz is positive downward in this convention)
+            # Accelerations (vz positive = downwards in this convention)
             ax = -K * vmag * vrelx
             ay = -K * vmag * vrely
             az =  g - K * vmag * vrelz
@@ -209,75 +207,90 @@ def simulate_3d(
     return summary, df
 
 # -----------------------------
-# Input fingerprint (to detect changes without recompute on UI-only tweaks)
-# -----------------------------
-def pack_inputs(mass_kg, area_m2, cd, alt_ft, ktas, angle, surface, rho, g, dt,
-                include_ground_drag, vz_bounce_min):
-    """Return a plain-Python dict capturing inputs; used to detect changes."""
-    return dict(
-        mass_kg=float(mass_kg),
-        area_m2=float(area_m2),
-        cd=float(cd),
-        alt_ft=float(alt_ft),
-        ktas=float(ktas),
-        angle=int(angle),
-        surface=str(surface),
-        rho=float(rho),
-        g=float(g),
-        dt=float(dt),
-        include_ground_drag=bool(include_ground_drag),
-        vz_bounce_min=float(vz_bounce_min),
-    )
-
-# -----------------------------
 # Plotly animation builder (XY, XZ, YZ)
 # -----------------------------
-def build_plotly_animation(df, title="Trajectory Animation", frame_ms=25, max_frames=800):
+def build_plotly_animation(df, frame_ms=25, max_frames=800):
     """
     Build a 3‑pane Plotly animation (XY, XZ, YZ) from the simulation time series.
-    Axes: Display Line (x), Crowd (y), Height (z).
+    Axes: x (Display Line), y (Crowd), z (Height).
     """
+    # Colors for consistency across views
+    color_air = "#1f77b4"     # blue
+    color_ground = "#d62728"  # red
+
     phases = df["phase"].tolist()
     i_slide = phases.index("slide") if "slide" in phases else None
 
-    # Subplots titled with required nomenclature
     fig = make_subplots(
         rows=1, cols=3,
         subplot_titles=[
-            "Top View — Display Line (x) vs Crowd (y)",
-            "Side View — Display Line (x) vs Height (z)",
-            "Side View — Crowd (y) vs Height (z)"
+            "Top view",
+            "Side view (x–z)",
+            "Side view (y–z)"
         ],
         horizontal_spacing=0.06
     )
 
-    # Background paths
+    # --- Background paths (XY) ---
     if i_slide is not None:
         fig.add_trace(go.Scatter(x=df["x"][:i_slide+1], y=df["y"][:i_slide+1],
-                                 mode="lines", name="air"), row=1, col=1)
+                                 mode="lines", name="air", line=dict(color=color_air, width=3)), row=1, col=1)
         fig.add_trace(go.Scatter(x=df["x"][i_slide:],   y=df["y"][i_slide:],
-                                 mode="lines", name="ground"), row=1, col=1)
+                                 mode="lines", name="ground", line=dict(color=color_ground, width=3)), row=1, col=1)
     else:
-        fig.add_trace(go.Scatter(x=df["x"], y=df["y"], mode="lines", name="trajectory"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df["x"], y=df["y"], mode="lines",
+                                 name="air", line=dict(color=color_air, width=3)), row=1, col=1)
 
-    fig.add_trace(go.Scatter(x=df["x"], y=df["z"], mode="lines", showlegend=False), row=1, col=2)
-    fig.add_trace(go.Scatter(x=df["y"], y=df["z"], mode="lines", showlegend=False), row=1, col=3)
+    # --- Background paths (XZ) ---
+    if i_slide is not None:
+        fig.add_trace(go.Scatter(x=df["x"][:i_slide+1], y=df["z"][:i_slide+1],
+                                 mode="lines", showlegend=False, line=dict(color=color_air, width=3)), row=1, col=2)
+        fig.add_trace(go.Scatter(x=df["x"][i_slide:],   y=df["z"][i_slide:],
+                                 mode="lines", showlegend=False, line=dict(color=color_ground, width=3)), row=1, col=2)
+    else:
+        fig.add_trace(go.Scatter(x=df["x"], y=df["z"], mode="lines",
+                                 showlegend=False, line=dict(color=color_air, width=3)), row=1, col=2)
 
-    # Axis labels (your convention)
-    fig.update_xaxes(title_text="Display Line (x) [m]", row=1, col=1)
-    fig.update_yaxes(title_text="Crowd (y) [m]",        row=1, col=1)
-    fig.update_xaxes(title_text="Display Line (x) [m]", row=1, col=2)
-    fig.update_yaxes(title_text="Height (z) [m]",       row=1, col=2)
-    fig.update_xaxes(title_text="Crowd (y) [m]",        row=1, col=3)
-    fig.update_yaxes(title_text="Height (z) [m]",       row=1, col=3)
-    # Equal aspect for XY (plan view) so angles look right
+    # --- Background paths (YZ) ---
+    if i_slide is not None:
+        fig.add_trace(go.Scatter(x=df["y"][:i_slide+1], y=df["z"][:i_slide+1],
+                                 mode="lines", showlegend=False, line=dict(color=color_air, width=3)), row=1, col=3)
+        fig.add_trace(go.Scatter(x=df["y"][i_slide:],   y=df["z"][i_slide:],
+                                 mode="lines", showlegend=False, line=dict(color=color_ground, width=3)), row=1, col=3)
+    else:
+        fig.add_trace(go.Scatter(x=df["y"], y=df["z"], mode="lines",
+                                 showlegend=False, line=dict(color=color_air, width=3)), row=1, col=3)
+
+    # Short axis labels
+    fig.update_xaxes(title_text="x [m]", row=1, col=1)
+    fig.update_yaxes(title_text="y [m]", row=1, col=1)
+    fig.update_xaxes(title_text="x [m]", row=1, col=2)
+    fig.update_yaxes(title_text="z [m]", row=1, col=2)
+    fig.update_xaxes(title_text="y [m]", row=1, col=3)
+    fig.update_yaxes(title_text="z [m]", row=1, col=3)
+
+    # Equal aspect for XY so angles look right
     fig.update_yaxes(scaleanchor="x", scaleratio=1, row=1, col=1)
 
-    # Moving marker (red dot) on each subplot
-    marker_style = dict(mode="markers", marker=dict(color="red", size=8))
-    fig.add_trace(go.Scatter(x=[df["x"].iloc[0]], y=[df["y"].iloc[0]], showlegend=False, **marker_style), row=1, col=1)
-    fig.add_trace(go.Scatter(x=[df["x"].iloc[0]], y=[df["z"].iloc[0]], showlegend=False, **marker_style), row=1, col=2)
-    fig.add_trace(go.Scatter(x=[df["y"].iloc[0]], y=[df["z"].iloc[0]], showlegend=False, **marker_style), row=1, col=3)
+    # Axis-mapping legend entries (no data, just legend)
+    fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
+                             marker=dict(size=0, opacity=0),
+                             name="x = Display Line"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
+                             marker=dict(size=0, opacity=0),
+                             name="y = Crowd"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
+                             marker=dict(size=0, opacity=0),
+                             name="z = Height"), row=1, col=1)
+
+    # Moving markers (one per subplot)
+    marker_style = dict(mode="markers", marker=dict(color="white", line=dict(color="black", width=1), size=8))
+    fig.add_trace(go.Scatter(x=[df["x"].iloc[0]], y=[df["y"].iloc[0]],
+                             showlegend=False, **marker_style), row=1, col=1)
+    fig.add_trace(go.Scatter(x=[df["x"].iloc[0]], y=[df["z"].iloc[0]],
+                             showlegend=False, **marker_style), row=1, col=2)
+    fig.add_trace(go.Scatter(x=[df["y"].iloc[0]], y=[df["z"].iloc[0]],
+                             showlegend=False, **marker_style), row=1, col=3)
     marker_traces = [len(fig.data)-3, len(fig.data)-2, len(fig.data)-1]
 
     # Downsample frames for web performance
@@ -303,25 +316,31 @@ def build_plotly_animation(df, title="Trajectory Animation", frame_ms=25, max_fr
         ))
     fig.frames = frames
 
-    # Controls: Play/Pause/Stop/Replay + slider (animation speed = frame_ms)
+    # Controls: Play/Pause/Stop/Replay + slider (speed = frame_ms)
+    # Also set transition duration to 0 so frame_ms fully controls playback.
     fig.update_layout(
-        title=title,
+        title="Trajectory — x / y / z mapping in legend",
         margin=dict(t=50, l=20, r=20, b=80),
+        transition={"duration": 0},
         updatemenus=[{
             "type": "buttons", "direction": "left", "x": 0.5, "y": -0.12, "xanchor": "center",
             "showactive": False,
             "buttons": [
                 {"label": "Play", "method": "animate",
                  "args": [None, {"frame": {"duration": frame_ms, "redraw": True},
+                                 "transition": {"duration": 0},
                                  "fromcurrent": True, "mode": "immediate"}]},
                 {"label": "Pause", "method": "animate",
                  "args": [[None], {"frame": {"duration": 0, "redraw": False},
+                                   "transition": {"duration": 0},
                                    "mode": "immediate"}]},
                 {"label": "Stop", "method": "animate",
                  "args": [[frames[0].name], {"frame": {"duration": 0, "redraw": True},
+                                             "transition": {"duration": 0},
                                              "mode": "immediate"}]},
                 {"label": "Replay", "method": "animate",
                  "args": [None, {"frame": {"duration": frame_ms, "redraw": True},
+                                 "transition": {"duration": 0},
                                  "mode": "immediate"}]},
             ]
         }],
@@ -331,6 +350,7 @@ def build_plotly_animation(df, title="Trajectory Animation", frame_ms=25, max_fr
             "len": 0.9, "x": 0.05, "y": -0.05,
             "steps": [
                 {"args": [[fr.name], {"frame": {"duration": 0, "redraw": True},
+                                      "transition": {"duration": 0},
                                       "mode": "immediate"}],
                  "label": fr.name, "method": "animate"}
                 for fr in frames
@@ -343,7 +363,7 @@ def build_plotly_animation(df, title="Trajectory Animation", frame_ms=25, max_fr
 # UI
 # -----------------------------
 st.title("Airshow Trajectory Envelope (Wind = 0)")
-st.caption("Axes: **Display Line (x)**, **Crowd (y)**, **Height (z)**. Event-based impact, friction impulse, and ground slide. No wind advection.")
+st.caption("Legend: x = Display Line, y = Crowd, z = Height. No wind advection.")
 
 colL, colR = st.columns([1.1, 1.2])
 
@@ -381,23 +401,10 @@ with colL:
     vz_bounce_min = st.number_input("|vz| cutoff for bounce → slide (m/s)", value=0.5, min_value=0.1, max_value=2.0, step=0.1)
     include_ground_drag = st.checkbox("Include aerodynamic drag during slide", value=True)
 
-with colR:
-    # --- Simulation control ---
-    st.markdown("### Simulation Control")
-    st.checkbox("Auto‑update results when inputs change", key="auto_update",
-                help="If on, any change on the left recomputes automatically.")
     run_btn = st.button("Run simulation", type="primary", use_container_width=True)
 
-    # Fingerprint current inputs
-    current_inputs = pack_inputs(
-        mass_kg, area_m2, cd, alt_ft, ktas, angle, surface, rho, g, dt,
-        include_ground_drag, vz_bounce_min
-    )
-    inputs_changed = (st.session_state["last_inputs"] != current_inputs)
-
-    # Recompute if: pressed Run OR inputs changed with Auto‑update ON
-    compute_now = run_btn or (st.session_state["auto_update"] and inputs_changed)
-    if compute_now:
+with colR:
+    if run_btn:
         summary, df = simulate_3d(
             m=mass_kg, A=area_m2, Cd=cd, rho=rho, g=g, dt=dt,
             alt_ft=alt_ft, ktas=ktas, angle_deg=angle, surface=surface,
@@ -406,61 +413,25 @@ with colR:
         )
         st.session_state["sim_summary"] = summary
         st.session_state["sim_df"] = df
-        st.session_state["last_inputs"] = current_inputs
-    else:
-        if inputs_changed and not st.session_state["auto_update"]:
-            st.info("Inputs changed. Click **Run simulation** to recompute.")
 
     # Render if we have results
     if st.session_state["sim_df"] is not None and st.session_state["sim_summary"] is not None:
         summary = st.session_state["sim_summary"]
         df = st.session_state["sim_df"]
 
-        st.subheader("Results")
+        st.subheader("Results (click Run after changing inputs)")
         mcols = st.columns(4)
         mcols[0].metric("Air distance to first impact (m)", f"{summary['air_dist_xy_m']:.1f}")
         mcols[1].metric("Ground distance to rest (m)", f"{summary['ground_dist_xy_m']:.1f}")
         mcols[2].metric("Total ground‑planar distance (m)", f"{summary['total_dist_xy_m']:.1f}")
         mcols[3].metric("Impacts (incl. first)", f"{summary['impacts']}")
 
-        # Visualization
         st.markdown("---")
         st.subheader("Visualization")
-        use_animation = st.checkbox("Interactive animation (Plotly)", value=True,
-                                    help="Play/Pause/Stop/Replay in XY, XZ, YZ.")
         frame_ms = st.slider("Animation speed (ms per frame)", 10, 200, 25, step=5)
 
-        if use_animation:
-            fig_anim = build_plotly_animation(
-                df,
-                title="Trajectory — Display Line (x), Crowd (y), Height (z)",
-                frame_ms=frame_ms
-            )
-            st.plotly_chart(fig_anim, use_container_width=True)
-        else:
-            # Static Matplotlib fallback (renamed axes)
-            fig_xy = plt.figure(figsize=(5.5,4.5))
-            if "slide" in df["phase"].values:
-                i_slide = df["phase"].tolist().index("slide")
-                plt.plot(df["x"].iloc[:i_slide+1], df["y"].iloc[:i_slide+1], label="air")
-                plt.plot(df["x"].iloc[i_slide:],   df["y"].iloc[i_slide:],   label="ground")
-            else:
-                plt.plot(df["x"], df["y"], label="air")
-            plt.xlabel("Display Line (x) [m]"); plt.ylabel("Crowd (y) [m]")
-            plt.axis("equal"); plt.legend(); plt.tight_layout()
-            st.pyplot(fig_xy, use_container_width=True)
-
-            fig_xz = plt.figure(figsize=(5.5,3.5))
-            plt.plot(df["x"], df["z"])
-            plt.xlabel("Display Line (x) [m]"); plt.ylabel("Height (z) [m]")
-            plt.tight_layout()
-            st.pyplot(fig_xz, use_container_width=True)
-
-            fig_yz = plt.figure(figsize=(5.5,3.5))
-            plt.plot(df["y"], df["z"])
-            plt.xlabel("Crowd (y) [m]"); plt.ylabel("Height (z) [m]")
-            plt.tight_layout()
-            st.pyplot(fig_yz, use_container_width=True)
+        fig_anim = build_plotly_animation(df, frame_ms=frame_ms)
+        st.plotly_chart(fig_anim, use_container_width=True)
 
         # Downloads
         st.subheader("Download outputs")
@@ -476,4 +447,4 @@ with colR:
                            file_name="trajectory_summary.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     else:
-        st.info("Configure inputs on the left, then click **Run simulation** (or enable **Auto‑update**).")
+        st.info("Configure inputs on the left, then click **Run simulation**.")
