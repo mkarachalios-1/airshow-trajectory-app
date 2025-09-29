@@ -6,6 +6,9 @@ import matplotlib.pyplot as plt
 import streamlit as st
 import xlsxwriter
 
+from plotly.subplots import make_subplots
+import plotly.graph_objects as go
+
 st.set_page_config(page_title="Airshow Trajectory (Wind=0)", layout="wide")
 
 # -----------------------------
@@ -24,7 +27,7 @@ SURFSETS = {
 
 def simulate_3d(
     m, A, Cd, rho, g, dt,
-    alt_ft, ktas, angle_deg, surface="grass",  # default grass per preference
+    alt_ft, ktas, angle_deg, surface="grass",
     vz0=0.0, include_ground_drag=True,
     vz_bounce_min=0.5, max_steps=300000
 ):
@@ -38,7 +41,6 @@ def simulate_3d(
     V       = ktas * 0.514444444
     theta   = math.radians(angle_deg)
     vx0, vy0 = V*math.cos(theta), V*math.sin(theta)
-    windx = windy = windz = 0.0
 
     # Surface params
     s = SURFSETS[surface]
@@ -64,14 +66,13 @@ def simulate_3d(
 
     for step in range(max_steps):
         if airborne:
-            vrelx = vx - windx
-            vrely = vy - windy
-            vrelz = vz - windz
+            # Relative velocity (wind = 0)
+            vrelx, vrely, vrelz = vx, vy, vz
             vmag  = math.sqrt(vrelx*vrelx + vrely*vrely + vrelz*vrelz)
 
             ax = -K * vmag * vrelx
             ay = -K * vmag * vrely
-            az =  g - K * vmag * vrelz   # z positive DOWN
+            az =  g - K * vmag * vrelz   # z positive DOWN in accel convention
 
             vx_new = clamp_eps(vx + ax*dt)
             vy_new = clamp_eps(vy + ay*dt)
@@ -180,6 +181,120 @@ def simulate_3d(
     return summary, df
 
 # -----------------------------
+# Plotly animation builder
+# -----------------------------
+def build_plotly_animation(df, title="Trajectory Animation", frame_ms=25, max_frames=800):
+    """
+    Build a 3‑pane Plotly animation (XY, XZ, YZ) from the simulation time series.
+    - frame_ms: milliseconds per frame (lower = faster animation)
+    - max_frames: cap frames for smooth playback on the web
+    """
+    # Determine where slide starts (if at all)
+    phases = df["phase"].tolist()
+    i_slide = phases.index("slide") if "slide" in phases else None
+
+    # 1x3 subplots for XY, XZ, YZ
+    fig = make_subplots(
+        rows=1, cols=3,
+        subplot_titles=["Top View (XY)", "Side View (XZ)", "Front View (YZ)"],
+        horizontal_spacing=0.06
+    )
+
+    # Background: draw trajectory lines
+    # XY: split air vs ground if available
+    if i_slide is not None:
+        fig.add_trace(go.Scatter(x=df["x"][:i_slide+1], y=df["y"][:i_slide+1],
+                                 mode="lines", name="air"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df["x"][i_slide:],   y=df["y"][i_slide:],
+                                 mode="lines", name="ground"), row=1, col=1)
+    else:
+        fig.add_trace(go.Scatter(x=df["x"], y=df["y"], mode="lines", name="trajectory"), row=1, col=1)
+
+    # XZ and YZ lines
+    fig.add_trace(go.Scatter(x=df["x"], y=df["z"], mode="lines", name="xz", showlegend=False), row=1, col=2)
+    fig.add_trace(go.Scatter(x=df["y"], y=df["z"], mode="lines", name="yz", showlegend=False), row=1, col=3)
+
+    # Labels & scaling
+    fig.update_xaxes(title_text="x (m)", row=1, col=1)
+    fig.update_yaxes(title_text="y (m)", row=1, col=1)
+    fig.update_xaxes(title_text="x (m)", row=1, col=2)
+    fig.update_yaxes(title_text="z (m)", row=1, col=2)
+    fig.update_xaxes(title_text="y (m)", row=1, col=3)
+    fig.update_yaxes(title_text="z (m)", row=1, col=3)
+    # Equal aspect for XY so angles look right
+    fig.update_yaxes(scaleanchor="x", scaleratio=1, row=1, col=1)
+
+    # Moving markers (red dots), one per subplot
+    marker_style = dict(mode="markers", marker=dict(color="red", size=8))
+    fig.add_trace(go.Scatter(x=[df["x"].iloc[0]], y=[df["y"].iloc[0]],
+                             name="object", showlegend=False, **marker_style), row=1, col=1)
+    fig.add_trace(go.Scatter(x=[df["x"].iloc[0]], y=[df["z"].iloc[0]],
+                             showlegend=False, **marker_style), row=1, col=2)
+    fig.add_trace(go.Scatter(x=[df["y"].iloc[0]], y=[df["z"].iloc[0]],
+                             showlegend=False, **marker_style), row=1, col=3)
+
+    # Indices of the three moving marker traces (the last 3 traces added)
+    marker_traces = [len(fig.data)-3, len(fig.data)-2, len(fig.data)-1]
+
+    # Downsample frames for web performance
+    n = len(df)
+    step = max(1, n // max_frames)
+    idxs = list(range(0, n, step))
+    if idxs[-1] != n-1:
+        idxs.append(n-1)
+
+    # Build frames
+    frames = []
+    for k, i in enumerate(idxs):
+        r = df.iloc[i]
+        frames.append(go.Frame(
+            data=[
+                go.Scatter(x=[r["x"]], y=[r["y"]]),  # XY marker
+                go.Scatter(x=[r["x"]], y=[r["z"]]),  # XZ marker
+                go.Scatter(x=[r["y"]], y=[r["z"]])   # YZ marker
+            ],
+            traces=marker_traces,
+            name=str(k)
+        ))
+    fig.frames = frames
+
+    # Controls: Play / Pause / Stop / Replay + slider
+    fig.update_layout(
+        title=title,
+        margin=dict(t=50, l=20, r=20, b=80),
+        updatemenus=[{
+            "type": "buttons", "direction": "left", "x": 0.5, "y": -0.12, "xanchor": "center",
+            "showactive": False,
+            "buttons": [
+                {"label": "Play", "method": "animate",
+                 "args": [None, {"frame": {"duration": frame_ms, "redraw": True},
+                                 "fromcurrent": True, "mode": "immediate"}]},
+                {"label": "Pause", "method": "animate",
+                 "args": [[None], {"frame": {"duration": 0, "redraw": False},
+                                   "mode": "immediate"}]},
+                {"label": "Stop", "method": "animate",
+                 "args": [[frames[0].name], {"frame": {"duration": 0, "redraw": True},
+                                             "mode": "immediate"}]},
+                {"label": "Replay", "method": "animate",
+                 "args": [None, {"frame": {"duration": frame_ms, "redraw": True},
+                                 "mode": "immediate"}]},
+            ]
+        }],
+        sliders=[{
+            "currentvalue": {"prefix": "Frame: "},
+            "pad": {"t": 50},
+            "len": 0.9, "x": 0.05, "y": -0.05,
+            "steps": [
+                {"args": [[fr.name], {"frame": {"duration": 0, "redraw": True},
+                                      "mode": "immediate"}],
+                 "label": fr.name, "method": "animate"}
+                for fr in frames
+            ]
+        }]
+    )
+    return fig
+
+# -----------------------------
 # UI
 # -----------------------------
 st.title("Airshow Trajectory Envelope (Wind = 0)")
@@ -239,37 +354,44 @@ with colR:
         mcols[2].metric("Total ground-planar distance (m)", f"{summary['total_dist_xy_m']:.1f}")
         mcols[3].metric("Impacts (bounces incl. first)", f"{summary['impacts']}")
 
-        # Split where slide begins
-        phases = df["phase"].tolist()
-        i_slide = phases.index("slide") if "slide" in phases else None
+        # ---- Visualization toggle
+        st.markdown("---")
+        st.subheader("Visualization")
+        use_animation = st.checkbox("Interactive animation (Plotly)", value=True,
+                                    help="Play/Pause/Stop/Replay the trajectory in XY, XZ, YZ.")
+        frame_ms = st.slider("Animation speed (ms per frame)", 10, 200, 25, step=5)
 
-        # Top view (x-y)
-        fig_xy = plt.figure(figsize=(5.5,4.5))
-        if i_slide is None:
-            plt.plot(df["x"], df["y"], label="air")
+        if use_animation:
+            fig_anim = build_plotly_animation(df, frame_ms=frame_ms)
+            st.plotly_chart(fig_anim, use_container_width=True)
         else:
-            plt.plot(df["x"].iloc[:i_slide+1], df["y"].iloc[:i_slide+1], label="air")
-            plt.plot(df["x"].iloc[i_slide:],   df["y"].iloc[i_slide:],   label="ground")
-        plt.xlabel("x (display line) [m]")
-        plt.ylabel("y (toward crowd) [m]")
-        plt.axis("equal"); plt.legend(); plt.tight_layout()
-        st.pyplot(fig_xy, use_container_width=True)
+            # --- Top view (x-y) ---
+            fig_xy = plt.figure(figsize=(5.5,4.5))
+            if "slide" in df["phase"].values:
+                i_slide = df["phase"].tolist().index("slide")
+                plt.plot(df["x"].iloc[:i_slide+1], df["y"].iloc[:i_slide+1], label="air")
+                plt.plot(df["x"].iloc[i_slide:],     df["y"].iloc[i_slide:],     label="ground")
+            else:
+                plt.plot(df["x"], df["y"], label="air")
+            plt.xlabel("x (display line) [m]"); plt.ylabel("y (toward crowd) [m]")
+            plt.axis("equal"); plt.legend(); plt.tight_layout()
+            st.pyplot(fig_xy, use_container_width=True)
 
-        # Side x-z
-        fig_xz = plt.figure(figsize=(5.5,3.5))
-        plt.plot(df["x"], df["z"])
-        plt.xlabel("x (display line) [m]"); plt.ylabel("z (height) [m]")
-        plt.tight_layout()
-        st.pyplot(fig_xz, use_container_width=True)
+            # --- Side x-z ---
+            fig_xz = plt.figure(figsize=(5.5,3.5))
+            plt.plot(df["x"], df["z"])
+            plt.xlabel("x (display line) [m]"); plt.ylabel("z (height) [m]")
+            plt.tight_layout()
+            st.pyplot(fig_xz, use_container_width=True)
 
-        # Side y-z
-        fig_yz = plt.figure(figsize=(5.5,3.5))
-        plt.plot(df["y"], df["z"])
-        plt.xlabel("y (toward crowd) [m]"); plt.ylabel("z (height) [m]")
-        plt.tight_layout()
-        st.pyplot(fig_yz, use_container_width=True)
+            # --- Side y-z ---
+            fig_yz = plt.figure(figsize=(5.5,3.5))
+            plt.plot(df["y"], df["z"])
+            plt.xlabel("y (toward crowd) [m]"); plt.ylabel("z (height) [m]")
+            plt.tight_layout()
+            st.pyplot(fig_yz, use_container_width=True)
 
-        # Downloads
+        # ---- Downloads
         st.subheader("Download outputs")
         csv_bytes = df.to_csv(index=False).encode("utf-8")
         st.download_button("Download time series (CSV)", data=csv_bytes, file_name="timeseries.csv", mime="text/csv")
@@ -281,5 +403,6 @@ with colR:
         st.download_button("Download summary + series (XLSX)", data=out.getvalue(),
                            file_name="trajectory_summary.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
     else:
         st.info("Configure inputs on the left, then click **Run simulation**.")
